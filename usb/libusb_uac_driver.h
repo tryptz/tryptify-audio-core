@@ -16,6 +16,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -176,6 +177,59 @@ public:
         return writtenFrames_.load(std::memory_order_acquire);
     }
 
+    // Frames of silence drainRing() has padded into iso packets since
+    // [start] because the ring ran dry. These are counted in
+    // playedFrames(), because the device really does render them — but
+    // they are not program material, so any consumer mapping position
+    // back to a source timeline has to subtract them. Without that, every
+    // underrun advances reported position without advancing the music,
+    // and the error accumulates for the life of the stream.
+    long silenceFrames() const {
+        return silenceFrames_.load(std::memory_order_acquire);
+    }
+
+    // Nominal frames sitting in submitted-but-uncompleted iso transfers:
+    // the pump's queue depth, fixed at start() from the transfer pool
+    // size and the packet rate. playedFrames() counts a frame when it is
+    // written into a transfer buffer, so the device does not render it
+    // until this many frames later.
+    //
+    // Deliberately the nominal depth rather than an instantaneous count.
+    // The true figure varies by at most one packet in steady state, and a
+    // position that jitters by a packet every callback is worse for a
+    // consumer than one that is offset by a stable constant.
+    int inflightFrames() const { return inflightNominalFrames_; }
+
+    // Frames the device has actually rendered: program material only,
+    // corrected for queue depth. This is the figure to use for media
+    // position or A/V sync; playedFrames() is the raw pump counter and
+    // leads this one.
+    //
+    // Residual error is the DAC's own rate-matching FIFO, which the
+    // device does not report and which no host-side accounting can
+    // recover. That part is a constant, so it belongs in a user-facing
+    // offset calibration rather than here.
+    long audibleFrames() const {
+        const long played = playedFrames();
+        const long silence = silenceFrames_.load(std::memory_order_acquire);
+        const long audible = played - silence - inflightNominalFrames_;
+        return audible > 0 ? audible : 0;
+    }
+
+    // Ring capacity in frames. Zero before the first successful start().
+    int ringFrames() const;
+
+    // Blocks until at least [frames] frames can be written or [timeoutMs]
+    // elapses. Returns true if the space is available. Lets a producer
+    // pace off the device instead of polling; writePcm() remains
+    // non-blocking and callers may ignore this entirely.
+    //
+    // The consumer signals without taking a lock, to keep the iso
+    // completion path lock-free as documented at the top of this file.
+    // That makes a missed wakeup possible, so this waits with a predicate
+    // and a deadline — a lost signal costs one timeout, never a hang.
+    bool waitWritable(int frames, int timeoutMs);
+
     const StreamFormat& currentFormat() const { return format_; }
 
     // Reason the most recent start() returned false, or Ok if it
@@ -285,6 +339,16 @@ private:
     // (see playedFrames() / writtenFrames()). Reset on start().
     std::atomic<long> writtenFrames_{0};
     std::atomic<long> playedFrames_{0};
+    // Frames of underrun padding included in playedFrames_. See
+    // silenceFrames() / audibleFrames().
+    std::atomic<long> silenceFrames_{0};
+    // Pump queue depth in frames, fixed by startIsoPump(). See
+    // inflightFrames().
+    int inflightNominalFrames_ = 0;
+    // Producer-side wait. Signalled (without locking) from drainRing on
+    // the event thread; waited on with a deadline in waitWritable.
+    mutable std::mutex writableMutex_;
+    mutable std::condition_variable writableCv_;
     std::thread eventThread_;
 
     // Per-packet frame count is computed from a 16.16 fixed-point

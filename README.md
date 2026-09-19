@@ -39,7 +39,18 @@ which is what lets the library build and test without a device.
   both consumers have; not safe to call straight from a hardware callback.
 - `LibusbUacDriver::playedFrames()` counts frames handed to the iso pump,
   underrun silence included. It leads what the DAC is playing by the frames
-  in flight.
+  in flight. **Use `audibleFrames()` for anything that maps position back to
+  a source timeline** — it subtracts underrun padding (`silenceFrames()`) and
+  the pump's queue depth (`inflightFrames()`). The padding term is the one
+  that matters: it accumulates, so with `playedFrames()` a single underrun
+  shifts reported position against the material for the rest of the stream.
+  What remains uncorrected is the DAC's own rate-matching FIFO, which the
+  device does not report; that part is constant and belongs in a user-facing
+  offset calibration.
+- `waitWritable()` lets a producer pace off the device instead of polling.
+  The iso completion path signals it without taking a lock, so a wakeup can
+  be lost; it waits on a predicate with a deadline, making that cost one
+  timeout rather than a stall.
 
 ## License
 

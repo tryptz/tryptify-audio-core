@@ -7,6 +7,7 @@
 #include <libusb.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 #define TAG "LibusbUacDriver"
@@ -952,6 +953,7 @@ bool LibusbUacDriver::start(int sampleRateHz, int bitsPerSample, int channels) {
     ringTail_.store(0, std::memory_order_relaxed);
     writtenFrames_.store(0, std::memory_order_relaxed);
     playedFrames_.store(0, std::memory_order_relaxed);
+    silenceFrames_.store(0, std::memory_order_relaxed);
     stopRequested_.store(false, std::memory_order_relaxed);
 
     if (!startIsoPump()) {
@@ -986,6 +988,7 @@ void LibusbUacDriver::flushRing() {
     // getCurrentPositionUs report frames from the previous track.
     writtenFrames_.store(0, std::memory_order_release);
     playedFrames_.store(0, std::memory_order_release);
+    silenceFrames_.store(0, std::memory_order_release);
 }
 
 bool LibusbUacDriver::isStreamingFormat(int sampleRate, int bitsPerSample, int channels) const {
@@ -997,6 +1000,12 @@ bool LibusbUacDriver::isStreamingFormat(int sampleRate, int bitsPerSample, int c
 
 void LibusbUacDriver::stop() {
     bool was = streaming_.exchange(false, std::memory_order_acq_rel);
+    // Release any producer parked in waitWritable() before we take
+    // mutex_ below: once the pump is down nothing will ever free ring
+    // space again, so a waiter would otherwise burn its whole timeout.
+    // Notified before the early return so a redundant stop() still wakes
+    // a stranded waiter.
+    writableCv_.notify_all();
     if (!was && transfers_.empty() && !interfaceClaimed_ && !controlInterfaceClaimed_) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1052,6 +1061,21 @@ bool LibusbUacDriver::startIsoPump() {
     maxFramesPerPacket_ = baseFrames + (rateRemainder > 0 ? 1 : 0)
                           // +1 headroom for feedback over-asks.
                           + 1;
+
+    // Frames the pump keeps submitted at any instant. playedFrames_
+    // counts a frame when it is written into a transfer buffer, so the
+    // device renders it roughly this many frames later. Fixed here
+    // rather than tracked per-callback: see inflightFrames().
+    inflightNominalFrames_ =
+        microframesPerSec_ > 0
+            ? static_cast<int>(static_cast<long long>(kNumTransfers) *
+                               kPacketsPerTransfer * format_.sampleRateHz /
+                               microframesPerSec_)
+            : 0;
+    LOGI("iso pump: queue depth %d frames (%.1f ms)", inflightNominalFrames_,
+         format_.sampleRateHz > 0
+             ? 1000.0 * inflightNominalFrames_ / format_.sampleRateHz
+             : 0.0);
 
     int frameStride = format_.channels * format_.bytesPerSample;
     int maxBytesPerPacket = maxFramesPerPacket_ * frameStride;
@@ -1351,17 +1375,34 @@ int LibusbUacDriver::drainRing(uint8_t* dst, int bytes) {
         }
         ringTail_.store(tail + n, std::memory_order_release);
     }
+    int frameStride = format_.channels * format_.bytesPerSample;
     if (n < bytes) {
         // Underrun — pad with silence so the iso packet still ships.
         // The DAC hears a click rather than dropping the entire URB.
         std::memset(dst + n, 0, bytes - n);
+        // Count the padding separately. It stays in playedFrames_ below
+        // because the device really does render it, but it is not
+        // program material — audibleFrames() subtracts it so one
+        // underrun does not permanently shift reported position against
+        // the source timeline.
+        if (frameStride > 0) {
+            silenceFrames_.fetch_add((bytes - n) / frameStride,
+                                     std::memory_order_acq_rel);
+        }
     }
     // Frames "played" = frames the pump has dispatched, including the
     // silence padding (since the device hears those samples too). Used
     // for accurate position reporting back to ExoPlayer.
-    int frameStride = format_.channels * format_.bytesPerSample;
     if (frameStride > 0) {
         playedFrames_.fetch_add(bytes / frameStride, std::memory_order_acq_rel);
+    }
+    if (n > 0) {
+        // Ring space freed. Signal without taking writableMutex_: this
+        // runs on the iso completion path, which the class contract keeps
+        // lock-free. waitWritable() re-checks its predicate under its own
+        // lock with a deadline, so a wakeup lost to this race costs one
+        // timeout rather than a stall.
+        writableCv_.notify_all();
     }
     return n;
 }
@@ -1398,6 +1439,32 @@ int LibusbUacDriver::writableFrames() const {
     uint64_t free = ringBytes_ - (head - tail);
     int frameStride = format_.channels * format_.bytesPerSample;
     return static_cast<int>(free / frameStride);
+}
+
+int LibusbUacDriver::ringFrames() const {
+    int frameStride = format_.channels * format_.bytesPerSample;
+    if (frameStride <= 0) return 0;
+    return static_cast<int>(ringBytes_ / frameStride);
+}
+
+bool LibusbUacDriver::waitWritable(int frames, int timeoutMs) {
+    if (frames <= 0) return true;
+    // Fast path: never touch the mutex when the space is already there.
+    if (writableFrames() >= frames) return true;
+    std::unique_lock<std::mutex> lock(writableMutex_);
+    writableCv_.wait_for(
+        lock, std::chrono::milliseconds(timeoutMs), [this, frames] {
+            // Give up immediately if the pump stopped underneath us —
+            // otherwise a producer would block for the full timeout on
+            // every call after teardown.
+            return !streaming_.load(std::memory_order_acquire) ||
+                   writableFrames() >= frames;
+        });
+    // Report what is actually true rather than merely that we stopped
+    // waiting: the predicate above also fires on teardown, when no space
+    // exists at all. Returning wait_for's value directly would tell a
+    // producer it may write into a dead ring.
+    return writableFrames() >= frames;
 }
 
 } // namespace monotrypt::usb
