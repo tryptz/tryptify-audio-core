@@ -3,7 +3,8 @@
 # tryptify-audio-core: the native audio pieces shared by Tryptify and the
 # StepMania port. Two static libraries, no JNI:
 #
-#   tac_usb  libusb UAC1/UAC2 isochronous output driver (+ vendored libusb)
+#   tac_usb  libusb UAC1/UAC2 isochronous output driver (vendored libusb by
+#            default; set TAC_LIBUSB_TARGET to reuse a consumer's own)
 #   tac_dsp  mix-bus DSP engine and its snap-in processors
 #
 # Consumers add_subdirectory() this and link the targets into their own shared
@@ -18,6 +19,15 @@ project(tryptify_audio_core LANGUAGES C CXX)
 option(TAC_BUILD_TESTS "Build host tests" ${PROJECT_IS_TOP_LEVEL})
 option(TAC_BUILD_USB   "Build the libusb output driver" ON)
 
+# A consumer that already vendors libusb must not get a second copy. Two
+# static libusb archives in one binary means duplicate symbols at link, or —
+# if the linker resolves it — two libusb contexts at runtime, each with its
+# own event thread and device list. ITGmania is exactly this case: it vendors
+# libusb-cmake for its arcade I/O boards. Point TAC_LIBUSB_TARGET at the
+# consumer's target and the vendored build is skipped.
+set(TAC_LIBUSB_TARGET "" CACHE STRING
+    "CMake target providing libusb-1.0. Empty builds the vendored copy.")
+
 set(TAC_ARM64_SIMD $<$<STREQUAL:${ANDROID_ABI},arm64-v8a>:-march=armv8-a+simd>)
 
 # ── libusb ───────────────────────────────────────────────────────────────
@@ -25,7 +35,17 @@ set(TAC_ARM64_SIMD $<$<STREQUAL:${ANDROID_ABI},arm64-v8a>:-march=armv8-a+simd>)
 # sources here lets one CMake toolchain cover every ABI. android/config.h is
 # upstream's pre-generated autotools config for bionic; it also holds on
 # glibc hosts, which is what lets the host test build link the driver.
-if(TAC_BUILD_USB)
+if(TAC_BUILD_USB AND TAC_LIBUSB_TARGET)
+    if(NOT TARGET ${TAC_LIBUSB_TARGET})
+        message(FATAL_ERROR
+            "TAC_LIBUSB_TARGET is set to '${TAC_LIBUSB_TARGET}', which is not "
+            "a CMake target. Define it before add_subdirectory() of this "
+            "project, or clear it to build the vendored libusb.")
+    endif()
+    message(STATUS "tac_usb: using consumer libusb target ${TAC_LIBUSB_TARGET}")
+    add_library(tac_libusb INTERFACE)
+    target_link_libraries(tac_libusb INTERFACE ${TAC_LIBUSB_TARGET})
+elseif(TAC_BUILD_USB)
     set(TAC_LIBUSB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libusb)
     if(NOT EXISTS ${TAC_LIBUSB_DIR}/libusb/core.c)
         message(FATAL_ERROR
@@ -52,7 +72,11 @@ if(TAC_BUILD_USB)
     set_target_properties(usb1.0 PROPERTIES POSITION_INDEPENDENT_CODE ON)
     find_package(Threads REQUIRED)
     target_link_libraries(usb1.0 PUBLIC Threads::Threads)
+    add_library(tac_libusb INTERFACE)
+    target_link_libraries(tac_libusb INTERFACE usb1.0)
+endif()
 
+if(TAC_BUILD_USB)
     add_library(tac_usb STATIC usb/libusb_uac_driver.cpp)
     target_include_directories(tac_usb PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/usb
@@ -62,7 +86,7 @@ if(TAC_BUILD_USB)
     # Static archives get linked into a consumer's .so, so the code inside
     # them must be position independent or the final link fails on arm64.
     set_target_properties(tac_usb PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_link_libraries(tac_usb PUBLIC usb1.0)
+    target_link_libraries(tac_usb PUBLIC tac_libusb)
     if(ANDROID)
         target_link_libraries(tac_usb PUBLIC log)
     endif()
