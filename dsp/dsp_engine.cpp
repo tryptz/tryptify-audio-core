@@ -39,11 +39,11 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
-#include <android/log.h>
+#include "tac_log.h"
 
 #define LOG_TAG "MonochromeDSP"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) TAC_LOG(DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) TAC_LOG(ERROR, LOG_TAG, __VA_ARGS__)
 
 // ── Denormal protection ────────────────────────────────────────────────
 #if defined(__aarch64__)

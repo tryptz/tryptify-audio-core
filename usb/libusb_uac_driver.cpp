@@ -3,16 +3,16 @@
 
 #include "libusb_uac_driver.h"
 
-#include <android/log.h>
+#include "tac_log.h"
 #include <libusb.h>
 
 #include <algorithm>
 #include <cstring>
 
 #define TAG "LibusbUacDriver"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGI(...) TAC_LOG(INFO, TAG, __VA_ARGS__)
+#define LOGW(...) TAC_LOG(WARN, TAG, __VA_ARGS__)
+#define LOGE(...) TAC_LOG(ERROR, TAG, __VA_ARGS__)
 
 namespace monotrypt::usb {
 
