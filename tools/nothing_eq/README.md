@@ -42,10 +42,10 @@ python3 tools/nothing_eq/nothing_eq.py --selftest
 with exactly 8 bands. Fit with `lim.numBands = 8` and no `types`, since every
 band is a peak.
 
-Not yet confirmed on a device: that Nothing X accepts a code it did not write
-itself, and what the two unknown bytes do. Scan a generated code before
-relying on it; if the app rejects it, export one more profile (a different
-name length, and some bands changed) and diff it against this one.
+Confirmed on a device: Nothing X imports a code it did not write. A generated
+"TrypT test" (the sample with band 1 raised to +2 dB) scanned in as a new
+profile with every band where it was set. What the two unknown bytes do is
+still open; writing them as the sample has them works.
 
 ## Exporting for diffs
 
@@ -80,7 +80,7 @@ these numbers, or it can produce bands the earbuds will clamp or refuse.
 | Value     | Min | Max | Step | Field (from the diff) |
 |-----------|-----|-----|------|-----------------------|
 | Frequency |     |     |      | float32, bytes 6+12n  |
-| Gain      |     |     |      | float32, bytes 2+12n  |
+| Gain      | -6? | +6? |      | float32, bytes 2+12n (slider geometry: dots 3 dB apart, ends at ±6) |
 | Q         | 0.1? | 10? |     | float32, bytes 10+12n (both values seen in the sample) |
 | Band type |  –  |  –  |  –   | none: all peaking     |
 | Preamp    |     |     |      | not in the share code |
