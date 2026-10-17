@@ -99,6 +99,7 @@ target_include_directories(tac_dsp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/dsp/util
     ${CMAKE_CURRENT_SOURCE_DIR}/dsp/snapins
     ${CMAKE_CURRENT_SOURCE_DIR}/dsp/oxford
+    ${CMAKE_CURRENT_SOURCE_DIR}/dsp/fit
     ${CMAKE_CURRENT_SOURCE_DIR}/common)
 target_compile_features(tac_dsp PUBLIC cxx_std_17)
 # Same flags the engine shipped with inside Tryptify. They stay PRIVATE: a
@@ -122,6 +123,11 @@ if(TAC_BUILD_TESTS AND NOT ANDROID)
     add_executable(dsp_engine_test tests/dsp_engine_test.cpp)
     target_link_libraries(dsp_engine_test PRIVATE tac_dsp)
     add_test(NAME dsp_engine COMMAND dsp_engine_test)
+
+    add_executable(peq_fitter_test tests/peq_fitter_test.cpp)
+    target_link_libraries(peq_fitter_test PRIVATE tac_dsp)
+    target_compile_options(peq_fitter_test PRIVATE -O2 -Wall -Wextra)
+    add_test(NAME peq_fitter COMMAND peq_fitter_test)
 
     if(TAC_BUILD_USB)
         add_executable(usb_link_test tests/usb_link_test.cpp)

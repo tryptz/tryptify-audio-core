@@ -18,6 +18,23 @@ enum class BiquadType {
     AllPass
 };
 
+// Normalized (a0 = 1) coefficients in double precision. The filter itself
+// runs in float; this form is for analysis, e.g. the PEQ fitter, which needs
+// the response of exactly the filter configure() would build.
+struct BiquadCoeffs {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+
+    // Magnitude response in dB at freq.
+    double magnitudeDb(double freq, double sampleRate) const {
+        double w = 2.0 * M_PI * freq / sampleRate;
+        double c1 = std::cos(w), s1 = std::sin(w);
+        double c2 = std::cos(2.0 * w), s2 = std::sin(2.0 * w);
+        double nr = b0 + b1 * c1 + b2 * c2, ni = -(b1 * s1 + b2 * s2);
+        double dr = 1.0 + a1 * c1 + a2 * c2, di = -(a1 * s1 + a2 * s2);
+        return 10.0 * std::log10((nr * nr + ni * ni) / (dr * dr + di * di));
+    }
+};
+
 class Biquad {
 public:
     void reset() { z1_ = z2_ = 0.0f; }
@@ -27,12 +44,22 @@ public:
     }
 
     void configure(BiquadType type, double sampleRate, double freq, double q, double gainDb = 0.0) {
+        BiquadCoeffs c = design(type, sampleRate, freq, q, gainDb);
+        b0_ = static_cast<float>(c.b0);
+        b1_ = static_cast<float>(c.b1);
+        b2_ = static_cast<float>(c.b2);
+        a1_ = static_cast<float>(c.a1);
+        a2_ = static_cast<float>(c.a2);
+    }
+
+    static BiquadCoeffs design(BiquadType type, double sampleRate, double freq, double q, double gainDb = 0.0) {
         double w0 = 2.0 * M_PI * freq / sampleRate;
         double cosw0 = std::cos(w0);
         double sinw0 = std::sin(w0);
         double alpha = sinw0 / (2.0 * q);
 
-        double b0, b1, b2, a0, a1, a2;
+        // Identity until a case sets them; every type does.
+        double b0 = 1.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0;
 
         switch (type) {
             case BiquadType::LowPass:
@@ -112,11 +139,7 @@ public:
         }
 
         // Normalize
-        b0_ = static_cast<float>(b0 / a0);
-        b1_ = static_cast<float>(b1 / a0);
-        b2_ = static_cast<float>(b2 / a0);
-        a1_ = static_cast<float>(a1 / a0);
-        a2_ = static_cast<float>(a2 / a0);
+        return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
     }
 
     float process(float in) {
