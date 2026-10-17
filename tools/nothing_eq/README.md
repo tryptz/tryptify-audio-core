@@ -79,9 +79,9 @@ these numbers, or it can produce bands the earbuds will clamp or refuse.
 
 | Value     | Min | Max | Step | Field (from the diff) |
 |-----------|-----|-----|------|-----------------------|
-| Frequency |     |     |      | float32, bytes 6+12n  |
+| Frequency | per band | per band |  | float32, bytes 6+12n (band 1: 20–99 Hz, others unmeasured; `PeqLimits::bandFreqRange`) |
 | Gain      | -6? | +6? |      | float32, bytes 2+12n (slider geometry: dots 3 dB apart, ends at ±6) |
-| Q         | 0.1? | 10? |     | float32, bytes 10+12n (both values seen in the sample) |
+| Q         | 0.1 | 10  |      | float32, bytes 10+12n (confirmed at both ends in the app) |
 | Band type |  –  |  –  |  –   | none: all peaking     |
 | Preamp    |     |     |      | not in the share code |
 

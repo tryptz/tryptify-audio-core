@@ -3,6 +3,7 @@
 #include "../util/biquad.h"
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 // Fits a fixed number of parametric EQ bands to a target curve, inside a
@@ -45,6 +46,10 @@ struct PeqLimits {
     double freqStep = 0.0, gainStep = 0.0, qStep = 0.0;
     // One type per band. Empty, or shorter than numBands, pads with Peaking.
     std::vector<BiquadType> types;
+    // One {min, max} frequency per band, for devices that tie each band to a
+    // region (the Nothing Ear's band 1 only reaches 20-99 Hz). Bands past the
+    // end of this use minFreq..maxFreq.
+    std::vector<std::pair<double, double>> bandFreqRange;
 };
 
 struct FitOptions {
@@ -108,15 +113,16 @@ public:
         for (int i = 0; i < n && i < static_cast<int>(lim_.types.size()); i++) types[i] = lim_.types[i];
 
         // Shelves first: they set the broad tilt that peaks then correct.
-        // That order is only for fitting; slot[k] remembers which device
-        // band bands[k] is, so each comes back in the slot its type was for.
-        std::vector<int> slot;
+        // That order is only for fitting; slot_[k] remembers which device
+        // band bands[k] is, so each keeps its slot's type and range and comes
+        // back in that slot.
+        slot_.clear();
         for (int pass = 0; pass < 2; pass++) {
             for (int i = 0; i < n; i++) {
                 bool shelf = types[i] != BiquadType::Peaking;
                 if (shelf != (pass == 0)) continue;
-                bands.push_back(initialBand(types[i], bands));
-                slot.push_back(i);
+                slot_.push_back(i);
+                bands.push_back(initialBand(types[i], i, bands));
                 refine(bands, 30);
             }
         }
@@ -125,7 +131,7 @@ public:
 
         PeqFit out;
         out.bands.resize(bands.size());
-        for (size_t k = 0; k < bands.size(); k++) out.bands[slot[k]] = bands[k];
+        for (size_t k = 0; k < bands.size(); k++) out.bands[slot_[k]] = bands[k];
         double sum = 0.0, peak = -1e9;
         for (size_t i = 0; i < freqs_.size(); i++) {
             double m = responseDb(bands, freqs_[i], lim_.sampleRate);
@@ -142,6 +148,7 @@ public:
 private:
     PeqLimits lim_;
     std::vector<double> freqs_, target_;
+    std::vector<int> slot_;
 
     double cost(const std::vector<PeqBand>& bands) const {
         double sum = 0.0;
@@ -159,14 +166,20 @@ private:
         return r;
     }
 
-    PeqBand clampBand(PeqBand b) const {
-        b.freq = std::clamp(b.freq, lim_.minFreq, lim_.maxFreq);
+    std::pair<double, double> freqRange(int slot) const {
+        if (slot < static_cast<int>(lim_.bandFreqRange.size())) return lim_.bandFreqRange[slot];
+        return {lim_.minFreq, lim_.maxFreq};
+    }
+
+    PeqBand clampBand(PeqBand b, int slot) const {
+        auto [lo, hi] = freqRange(slot);
+        b.freq = std::clamp(b.freq, lo, hi);
         b.gainDb = std::clamp(b.gainDb, lim_.minGainDb, lim_.maxGainDb);
         b.q = std::clamp(b.q, lim_.minQ, lim_.maxQ);
         return b;
     }
 
-    PeqBand initialBand(BiquadType type, const std::vector<PeqBand>& placed) const {
+    PeqBand initialBand(BiquadType type, int slot, const std::vector<PeqBand>& placed) const {
         std::vector<double> r = residual(placed);
         PeqBand b;
         b.type = type;
@@ -186,17 +199,22 @@ private:
                 }
             }
             b.gainDb = count ? sum / count : 0.0;
-            return clampBand(b);
+            return clampBand(b, slot);
         }
 
         // Peak: the biggest residual the band is allowed to reach, with Q
         // from the width of that bump at half its height.
+        auto [lo, hi] = freqRange(slot);
         int best = -1;
         for (size_t i = 0; i < freqs_.size(); i++) {
-            if (freqs_[i] < lim_.minFreq || freqs_[i] > lim_.maxFreq) continue;
+            if (freqs_[i] < lo || freqs_[i] > hi) continue;
             if (best < 0 || std::fabs(r[i]) > std::fabs(r[best])) best = static_cast<int>(i);
         }
-        if (best < 0) return clampBand(b);
+        if (best < 0) {
+            // Range falls outside the fit grid: park it flat mid-range.
+            b.freq = std::sqrt(lo * hi);
+            return clampBand(b, slot);
+        }
         double peak = r[best];
         int left = best, right = best;
         auto stillIn = [&](int i) { return r[i] * peak > 0.0 && std::fabs(r[i]) >= std::fabs(peak) * 0.5; };
@@ -206,7 +224,7 @@ private:
         b.gainDb = peak;
         double width = freqs_[right] - freqs_[left];
         b.q = width > 0.0 ? b.freq / width : lim_.maxQ;
-        return clampBand(b);
+        return clampBand(b, slot);
     }
 
     void toParams(const std::vector<PeqBand>& bands, std::vector<double>& x) const {
@@ -223,7 +241,7 @@ private:
             bands[b].freq = std::exp2(x[b * kParams + 0]);
             bands[b].gainDb = x[b * kParams + 1];
             bands[b].q = std::exp2(x[b * kParams + 2]);
-            bands[b] = clampBand(bands[b]);
+            bands[b] = clampBand(bands[b], slot_[b]);
         }
     }
 
@@ -346,8 +364,10 @@ private:
     }
 
     void snap(std::vector<PeqBand>& bands) const {
-        for (PeqBand& b : bands) {
-            b.freq = quantize(b.freq, lim_.freqStep, lim_.minFreq, lim_.maxFreq);
+        for (size_t k = 0; k < bands.size(); k++) {
+            PeqBand& b = bands[k];
+            auto [lo, hi] = freqRange(slot_[k]);
+            b.freq = quantize(b.freq, lim_.freqStep, lo, hi);
             b.gainDb = quantize(b.gainDb, lim_.gainStep, lim_.minGainDb, lim_.maxGainDb);
             b.q = quantize(b.q, lim_.qStep, lim_.minQ, lim_.maxQ);
         }
@@ -357,9 +377,11 @@ private:
         double current = cost(bands);
         for (int pass = 0; pass < 20; pass++) {
             bool changed = false;
-            for (PeqBand& b : bands) {
+            for (size_t k = 0; k < bands.size(); k++) {
+                PeqBand& b = bands[k];
+                auto [lo, hi] = freqRange(slot_[k]);
                 struct Axis { double* v; double step, lo, hi; };
-                Axis axes[3] = {{&b.freq, lim_.freqStep, lim_.minFreq, lim_.maxFreq},
+                Axis axes[3] = {{&b.freq, lim_.freqStep, lo, hi},
                                 {&b.gainDb, lim_.gainStep, lim_.minGainDb, lim_.maxGainDb},
                                 {&b.q, lim_.qStep, lim_.minQ, lim_.maxQ}};
                 for (Axis& ax : axes) {

@@ -131,6 +131,28 @@ int main() {
         check(onSteps, "every value lands on the device's resolution");
     }
     {
+        // Each band tied to its own region, as on the Nothing Ear (band 1:
+        // 20-99 Hz). The biggest bump is at 3 kHz, where greedy placement
+        // would put band 1 if it could.
+        std::vector<PeqBand> wants = {{BiquadType::Peaking, 3000.0, 6.0, 1.5},
+                                      {BiquadType::Peaking, 60.0, 3.0, 1.0},
+                                      {BiquadType::Peaking, 400.0, -2.0, 1.2}};
+        PeqLimits lim;
+        lim.minGainDb = -6.0;
+        lim.maxGainDb = 6.0;
+        lim.bandFreqRange = {{20.0, 99.0},     {50.0, 200.0},    {100.0, 500.0},  {200.0, 1000.0},
+                             {500.0, 2500.0},  {1000.0, 5000.0}, {2500.0, 10000.0}, {5000.0, 20000.0}};
+        PeqFit fit = fitPeq(renderCurve(wants, kRate), lim);
+        bool inRange = true;
+        for (size_t i = 0; i < fit.bands.size(); i++)
+            inRange = inRange && fit.bands[i].freq >= lim.bandFreqRange[i].first &&
+                      fit.bands[i].freq <= lim.bandFreqRange[i].second;
+        std::printf("      per-band ranges: rms %.3f dB, max %.3f dB\n", fit.rmsErrorDb, fit.maxErrorDb);
+        printBands(fit);
+        check(inRange, "every band stays inside its own frequency range");
+        check(fit.rmsErrorDb < 0.1, "per-band ranges still fit a curve they can reach");
+    }
+    {
         PeqFit fit = fitPeq({{20.0, 0.0}, {20000.0, 0.0}}, PeqLimits{});
         double most = 0.0;
         for (const PeqBand& b : fit.bands) most = std::max(most, std::fabs(b.gainDb));
