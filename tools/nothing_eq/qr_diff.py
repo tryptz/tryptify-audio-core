@@ -167,17 +167,22 @@ def plausible_float(v):
 
 
 def readings(base, new, lo, hi):
-    """Every field that could hold the changed bytes lo..hi-1: it must cover
-    all of them, and be at most twice their width (2 bytes for a 1-byte
-    change), or it is mostly bytes that did not change."""
+    """Every field that could hold the changed bytes lo..hi-1. It must cover
+    all of them, and fields need not be aligned: Nothing's floats start at
+    byte 2. An integer must be at most twice the change's width (2 bytes for
+    a 1-byte change), or it is mostly bytes that did not change. A float is
+    always tried, since a small change in one often touches a single byte,
+    and plausible_float() throws out the misreads."""
     out = []
     width = hi - lo
     for fmt, name in TYPES:
         size = struct.calcsize(fmt)
-        if size < width or size > max(2, width * 2):
+        if size < width:
+            continue
+        if not name.startswith("f") and size > max(2, width * 2):
             continue
         for off in range(hi - size, lo + 1):
-            if off < 0 or off % size or off + size > min(len(base), len(new)):
+            if off < 0 or off + size > min(len(base), len(new)):
                 continue
             was = struct.unpack_from(fmt, base, off)[0]
             now = struct.unpack_from(fmt, new, off)[0]
@@ -206,8 +211,8 @@ def diff_bytes(base, new):
         print("    no bytes changed")
     for lo, hi in runs:
         print(f"    bytes {lo}..{hi - 1}: {base[lo:hi].hex(' ')} -> {new[lo:hi].hex(' ')}")
-        # A multi-byte field can change only its low byte, so a field may
-        # start before the change; readings() tries each aligned start.
+        # A multi-byte field can change only some of its bytes, so a field
+        # may start before the change; readings() tries each start.
         by_offset = {}
         for off, text in readings(base, new, lo, hi):
             by_offset.setdefault(off, []).append(text)

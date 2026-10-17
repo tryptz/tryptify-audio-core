@@ -1,16 +1,55 @@
 # Nothing Ear EQ: decoding the share format
 
-Goal: send EQ bands from our fitter (`dsp/fit/peq_fitter.h`) to a Nothing Ear
-(B171) over its RFCOMM control channel, so the earbuds' own 8-band advanced EQ
-runs our curve. The firmware is not touched. Nothing X's "share EQ" QR code
-holds the same band data the app sends, and it is the easiest place to read
-the format from.
+Goal: get EQ bands from our fitter (`dsp/fit/peq_fitter.h`) onto a Nothing
+Ear (B171), so the earbuds' own 8-band advanced EQ runs our curve. The
+firmware is not touched. Nothing X shares and imports EQ profiles as QR codes,
+so writing that code is enough to hand the app any 8 bands.
 
 Gadgetbridge supports Ear (1), (2), (a) and Stick, but not this model. Ear (a)
 launched alongside it and probably shares the protocol family. That is
 unverified.
 
-## Exporting
+## The format (decoded)
+
+Read from one export ("Custom 1"), and confirmed by re-encoding its bands into
+the app's exact bytes. The QR text is `base64(gzip(payload))`:
+
+| Bytes | Content |
+|-------|---------|
+| 0     | `00`, unknown |
+| 1     | `60` = 96 = 8 bands × 12 bytes (inferred: table length) |
+| 2–97  | 8 × { gain dB, freq Hz, Q }, each a little-endian float32 |
+| 98    | `01`, unknown |
+| 99    | name length (inferred) |
+| 100–  | name, UTF-8 (inferred; the sample is ASCII) |
+
+There is no band type field, so every band is a peaking filter. Default band
+centres are 55, 110, 220, 440, 1320, 3300, 6600 and 13200 Hz.
+
+## Writing a code for Nothing X
+
+`nothing_eq.py` decodes and encodes this format, so any 8 bands, the
+fitter's included, can go onto the earbuds through the stock app's "scan EQ"
+import:
+
+```
+python3 tools/nothing_eq/nothing_eq.py decode share.png
+python3 tools/nothing_eq/nothing_eq.py encode --json bands.json --qr out.png
+python3 tools/nothing_eq/nothing_eq.py --selftest
+```
+
+`bands.json` is `{"name": "...", "bands": [{"freq": 55, "gain": 0, "q": 1}, ...]}`
+with exactly 8 bands. Fit with `lim.numBands = 8` and no `types`, since every
+band is a peak.
+
+Not yet confirmed on a device: that Nothing X accepts a code it did not write
+itself, and what the two unknown bytes do. Scan a generated code before
+relying on it; if the app rejects it, export one more profile (a different
+name length, and some bands changed) and diff it against this one.
+
+## Exporting for diffs
+
+Only needed now to pin down the unknown bytes and the limits.
 
 Turn off Personal Sound Profile and Enhanced Bass in Nothing X first; both
 change the EQ data too.
@@ -28,8 +67,8 @@ change the EQ data too.
 The script peels the layers off (URL field, hex or base64, zlib/gzip/deflate)
 and prints what changed against the baseline: JSON fields, text tokens, or
 bytes. A changed byte range is also printed as every integer and float type
-that could hold it, with the delta. A +3 dB change showing up as `i16le +300`
-means gain is stored as a little-endian int16 in hundredths of a dB.
+that could hold it, with the delta. In this format a gain change reads as,
+say, `f32le -2.5->-4`: a little-endian float holding the dB value as is.
 `--save` keeps each raw string (`.txt`) and decoded payload (`.bin`).
 `--selftest` runs it on a made-up payload to show what the output looks like.
 
@@ -40,11 +79,11 @@ these numbers, or it can produce bands the earbuds will clamp or refuse.
 
 | Value     | Min | Max | Step | Field (from the diff) |
 |-----------|-----|-----|------|-----------------------|
-| Frequency |     |     |      |                       |
-| Gain      |     |     |      |                       |
-| Q         |     |     |      |                       |
-| Band type |  –  |  –  |  –   | fixed per band? which? |
-| Preamp    |     |     |      | exists?               |
+| Frequency |     |     |      | float32, bytes 6+12n  |
+| Gain      |     |     |      | float32, bytes 2+12n  |
+| Q         | 0.1? | 10? |     | float32, bytes 10+12n (both values seen in the sample) |
+| Band type |  –  |  –  |  –   | none: all peaking     |
+| Preamp    |     |     |      | not in the share code |
 
 They map one to one onto `PeqLimits`:
 
@@ -58,9 +97,10 @@ lim.minQ = /*Min*/;      lim.maxQ = /*Max*/;      lim.qStep = /*Step*/;
 auto fit = tryptify::fit::fitPeq(target, lim);
 ```
 
-## Then
+## Then (only for a custom app)
 
-Capture the Bluetooth traffic (Developer options → Bluetooth HCI snoop log,
-toggle Bluetooth, change one band, `adb bugreport`, filter `btrfcomm` in
-Wireshark). The frame sent right after the change should carry the same
-values the QR diff found, which gives the command to build the app around.
+The QR route needs no app. For one that sends EQ live, capture the Bluetooth
+traffic (Developer options → Bluetooth HCI snoop log, toggle Bluetooth, change
+one band, `adb bugreport`, filter `btrfcomm` in Wireshark). The frame sent
+right after the change should carry the same floats the share code does,
+which gives the command to build the app around.
