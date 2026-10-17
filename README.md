@@ -7,6 +7,7 @@ and the StepMania Android port.
 |-----------|------------|
 | `tac_usb` | libusb UAC1/UAC2 isochronous output driver. Takes a `UsbDeviceConnection` fd, owns the streaming interface, paces from the async feedback endpoint. |
 | `tac_dsp` | Mix-bus DSP engine: four buses plus master, snap-in processor chains, oversampling. |
+| `tac_dsp` (header) | `dsp/fit/peq_fitter.h`: fits a fixed-band PEQ to a target curve within a device's limits and resolution, for earbuds that run their own EQ. |
 
 No JNI. JNI symbol names encode the calling class, so each app keeps its own
 bridge and links these static libraries into its own `.so`.
